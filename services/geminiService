@@ -1,0 +1,106 @@
+import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
+import { PropertyDetails } from '../types';
+
+const API_KEY = process.env.API_KEY;
+
+if (!API_KEY) {
+  console.error("API_KEY for Gemini is not configured in environment variables.");
+}
+
+const ai = new GoogleGenAI({ apiKey: API_KEY || "MISSING_API_KEY" });
+const model = "gemini-2.5-flash-preview-04-17";
+
+export const extractPropertyDetails = async (listingContent: string): Promise<PropertyDetails> => {
+  if (!API_KEY) {
+    throw new Error("Gemini API Key is not configured. Please set the API_KEY environment variable.");
+  }
+
+  const prompt = `
+You are an expert real estate data extraction AI.
+Analyze the following property listing content. The input text might be the raw textual content of a webpage, potentially including HTML tags. Focus on extracting the semantic property details.
+Return the information ONLY as a valid JSON object. Do not include any explanatory text, comments, or markdown formatting like \`\`\`json ... \`\`\` around the JSON.
+The JSON object must conform to the following structure:
+{
+  "address": "string | null (Full address including city and country if available)",
+  "price": "number | null (Numeric value only, e.g., 500000, not '$500,000')",
+  "bedrooms": "number | null (e.g., 3)",
+  "bathrooms": "number | null (e.g., 2 or 2.5)",
+  "sqft": "number | null (Numeric square footage or square meters)",
+  "propertyType": "string | null (e.g., 'House', 'Condo', 'Apartment', 'Villa', 'Townhouse')",
+  "description": "string | null (A comprehensive summary of the property)",
+  "keyFeatures": "string[] (An array of 3-5 key features or amenities, e.g., ['Pool', 'Garage'])",
+  "propertyTitle": "string | null (The main title or headline of the listing)",
+  "images": "string[] (An array of direct URLs to property images found in the text. Only include URLs that appear to be actual image files e.g. ending in .jpg, .png, .webp. If no direct URLs, use an empty array.)",
+  "purpose": "'For Sale' | 'For Rent' | string | null (e.g., 'For Sale', 'For Rent')",
+  "furnishingType": "'Furnished' | 'Unfurnished' | 'Partly Furnished' | string | null",
+  "amenities": "string[] (A comprehensive list of all amenities mentioned, e.g., ['Swimming Pool', 'Gym', 'Covered Parking', 'Security', 'Balcony'])",
+  "validatedInformation": "string[] (List any claims of validated or verified information, e.g., ['RERA Certified', 'Title Deed Available'])",
+  "buildingInformation": "string | null (Details about the building, e.g., 'Burj Khalifa, Floor 25, Total 163 floors')",
+  "permitNumber": "string | null (Specific permit number for construction or listing, if mentioned)",
+  "dedNumber": "string | null (DED License number of the agency or developer, if mentioned)",
+  "reraNumber": "string | null (RERA Registration number for the property or project, if mentioned)",
+  "referenceId": "string | null (The unique reference ID for the listing on its original platform)",
+  "brnDld": "string | null (Broker's RERA BRN or DLD Permit Number, if mentioned)",
+  "listedBy": {
+    "name": "string | null (Name of the listing agent or contact person)",
+    "phone": "string | null (Contact phone number)",
+    "email": "string | null (Contact email address)",
+    "company": "string | null (Name of the real estate agency or company)"
+  } | null
+}
+If a specific detail is not found in the text, use null for its value (for string, number, or object types) or an empty array [] for array types (images, keyFeatures, amenities, validatedInformation). Be thorough and extract as much relevant information as possible.
+
+Property listing content:
+---
+${listingContent}
+---
+`;
+
+  try {
+    const response: GenerateContentResponse = await ai.models.generateContent({
+      model: model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.1, // Even lower temperature for highly factual extraction
+      },
+    });
+
+    let jsonStr = response.text.trim();
+    
+    const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+    const match = jsonStr.match(fenceRegex);
+    if (match && match[2]) {
+      jsonStr = match[2].trim();
+    }
+
+    try {
+      const parsedData = JSON.parse(jsonStr) as PropertyDetails;
+      
+      // Ensure all array fields are arrays, even if AI returns null
+      parsedData.images = Array.isArray(parsedData.images) ? parsedData.images : [];
+      parsedData.keyFeatures = Array.isArray(parsedData.keyFeatures) ? parsedData.keyFeatures : [];
+      parsedData.amenities = Array.isArray(parsedData.amenities) ? parsedData.amenities : [];
+      parsedData.validatedInformation = Array.isArray(parsedData.validatedInformation) ? parsedData.validatedInformation : [];
+      
+      // Ensure listedBy is an object or null
+      if (parsedData.listedBy && typeof parsedData.listedBy !== 'object') {
+        parsedData.listedBy = null;
+      }
+      // No explicit default for listedBy if null; component should handle null listedBy
+
+      return parsedData;
+    } catch (e) {
+      console.error("Failed to parse JSON response from Gemini:", e);
+      console.error("Raw response text:", response.text);
+      throw new Error(`Failed to parse extracted property details. The AI returned: ${jsonStr.substring(0,150)}...`);
+    }
+
+  } catch (error) {
+    console.error("Error calling Gemini API:", error);
+    if (error instanceof Error) {
+         throw new Error(`Gemini API Error: ${error.message}`);
+    }
+    throw new Error("An unknown error occurred while fetching data from Gemini API.");
+  }
+};
